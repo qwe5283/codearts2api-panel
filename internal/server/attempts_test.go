@@ -241,3 +241,44 @@ func TestQueueRetryDefaultBounded(t *testing.T) {
 		t.Fatalf("排队重试上限 %s 过短，瞬时的上游排队会直接失败", total)
 	}
 }
+
+// 排队重试「释放 → 等待 → 重获」时，若重获失败（槽位被别的请求拿走），本请求已不持有
+// 槽位，收尾不能再释放一次：计数器是账号级的、不分持有者，多减一次就是把别人的
+// 槽位还掉，账号随即被超发。
+func TestQueueRetryReacquireFailureDoesNotReleaseOthersSlot(t *testing.T) {
+	oldWait := queueReacquireWait
+	queueReacquireWait = 200 * time.Millisecond
+	defer func() { queueReacquireWait = oldWait }()
+
+	firstCall := make(chan struct{})
+	var calls int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			close(firstCall)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error_code":"TM.00001041","error_msg":"并发会话数已达上限(3个)，请关闭部分会话后重试。"}`)
+	}))
+	defer up.Close()
+	p := singleAccountPool(t, "u-reacquire", up.URL)
+	h := NewHandler(Config{Pool: p, APIKey: "k", MaxRotate: 1, QueueMaxAttempts: 3, QueueRetryDelay: 100 * time.Millisecond})
+
+	// 另一个请求在本请求让出槽位的间隙占住它，并一直持有到断言之后。
+	occupied := make(chan bool, 1)
+	go func() {
+		<-firstCall
+		occupied <- p.AcquireLockWait("u-reacquire", time.Second)
+	}()
+	rec := panelRequest(h, http.MethodPost, "/v1/chat/completions", chatBody("glm-5.2"), "k")
+	if !<-occupied {
+		t.Fatal("测试前置：没能在让出的间隙占住槽位")
+	}
+	defer p.ReleaseLock("u-reacquire")
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("重获失败时请求不应成功，body=%s", rec.Body.String())
+	}
+	if active := p.List()[0]["active_concurrent"]; active != 1 {
+		t.Fatalf("另一个请求仍持有槽位，active_concurrent 应为 1，got %v（被多释放了一次）", active)
+	}
+}

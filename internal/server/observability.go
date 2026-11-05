@@ -319,7 +319,19 @@ func (h *Handler) finishRequest(event reqlog.Event, observed *responseObserver, 
 		event.Error = ""
 	}
 	h.cfg.RequestLog.Record(event)
-	line := fmt.Sprintf("chat request=%s model=%s status=%d ok=%t duration_ms=%d tokens=%d", event.RequestID, safeLogLabel(event.Model), event.Status, event.OK, event.DurationMs, event.TotalTokens)
+	// 运行日志带上首字延迟、排队时长、尝试次数与账号：面板「运行日志」页据此一眼
+	// 看出慢在排队还是慢在模型、是否换过号（这些字段请求记录里本来就有）。
+	line := fmt.Sprintf("chat request=%s model=%s status=%d ok=%t duration_ms=%d ttfb_ms=%d tokens=%d",
+		event.RequestID, safeLogLabel(event.Model), event.Status, event.OK, event.DurationMs, event.TTFBMs, event.TotalTokens)
+	if event.QueueMs > 0 {
+		line += fmt.Sprintf(" queue_ms=%d", event.QueueMs)
+	}
+	if event.Attempts > 1 {
+		line += fmt.Sprintf(" attempts=%d", event.Attempts)
+	}
+	if event.Account != "" {
+		line += " account=" + event.Account
+	}
 	if event.Error != "" {
 		line += fmt.Sprintf(" error=%q", event.Error)
 	}

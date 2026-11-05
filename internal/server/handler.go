@@ -145,6 +145,9 @@ func (h *Handler) loginConfig() upstream.LoginConfig {
 	return cfg
 }
 
+// queueReacquireWait 排队重试等完间隔后重新拿回本账号槽位的上限（测试可覆盖）。
+var queueReacquireWait = 30 * time.Second
+
 var dynamicModelsCache struct {
 	sync.RWMutex
 	ids      []upstream.ModelInfo
@@ -1080,6 +1083,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			var rc io.ReadCloser
 			var serr error
 			authRetried := false
+			// lockHeld 跟踪本请求是否仍持有并发槽位：排队重试会「释放→等待→重获」，
+			// 重获失败时不能再走下面的统一释放（计数器是账号级的、不分持有者，
+			// 多减一次就是把别的在跑请求的槽位还掉，账号随即被超发）。
+			lockHeld := true
 			queueAttempts, queueDelay := h.live().QueueMaxAttempts, h.live().QueueRetryDelay
 			if queueAttempts < 1 {
 				queueAttempts = 1
@@ -1117,6 +1124,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					log.Printf("upstream queue limit retry=%d/%d account=%s, waiting %s", retry+1, queueAttempts, acct.Name, queueDelay)
 					// 释放锁让其他请求有机会，等待后重新获取
 					h.cfg.Pool.ReleaseLock(acct.Name)
+					lockHeld = false
 					queueStarted := time.Now()
 					select {
 					case <-time.After(queueDelay):
@@ -1126,16 +1134,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					event.QueueMs += time.Since(queueStarted).Milliseconds()
-					if !h.cfg.Pool.AcquireLockWait(acct.Name, 30*time.Second) {
+					if !h.cfg.Pool.AcquireLockWait(acct.Name, queueReacquireWait) {
 						lastErr = errors.New("concurrent limit: could not reacquire lock after wait")
 						break
 					}
+					lockHeld = true
 					continue
 				}
 				break // 非并发错误，跳出重试
 			}
 			if serr != nil {
-				h.cfg.Pool.ReleaseLock(acct.Name) // 释放槽位再换号
+				if lockHeld {
+					h.cfg.Pool.ReleaseLock(acct.Name) // 释放槽位再换号
+				}
 				if clientGone(r) {
 					// 调用方自己断开了：上游必然报 context canceled / broken pipe。
 					log.Printf("client disconnected before upstream reply account=%s: %v", acct.Name, serr)
