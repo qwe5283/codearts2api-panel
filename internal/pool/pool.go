@@ -84,6 +84,9 @@ type Pool struct {
 	stateMu  sync.Mutex
 	accounts []*Account
 	nextRR   int
+	// pickLeast 是 least_active 策略的轮转游标：并发相同（含都空闲）时按它决定
+	// 选中谁，并移到选中账号的下一个 —— 空闲账号之间严格轮转，避免退化回 first-fit。
+	pickLeast int
 }
 
 // New 构建池。
@@ -368,6 +371,7 @@ func (p *Pool) SyncToDir(auths []*auth.Auth) {
 }
 
 // PickExcluding 按策略挑一个健康账号，不并发查询积分余额。
+// strategy 取值：first（默认）/ credits / round_robin / least_active。
 func (p *Pool) PickExcluding(tried map[string]bool, strategy string) *Account {
 	return p.PickExcludingMatching(tried, strategy, nil)
 }
@@ -408,6 +412,41 @@ func (p *Pool) PickExcludingMatching(tried map[string]bool, strategy string, eli
 				p.nextRR = (i + 1) % len(p.accounts)
 				return p.accounts[i]
 			}
+		}
+		return nil
+	}
+	if strategy == "least_active" && len(p.accounts) > 0 {
+		// 在未排除的健康账号里挑「活跃并发最少」的那个；并发相同时由 pickLeast 游标
+		// 打破平局并前移 —— 空闲账号之间是严格轮转的。
+		//
+		// first-fit 的问题：多账号池会把流量全压给列表里第一个账号，它的上游会话
+		// （每账号 3 个，按 chat_id 计）先打满、开始回 TM.00001041，其它账号空转，
+		// 用量与积分也随之严重倾斜。实测（2 账号、max_concurrent=2、4 并发 4 会话）：
+		// first-fit 墙钟 66~67s、排队重试 17 次全落同一账号；least_active 2.8~3.1s、
+		// 0 重试，账号分布 11:9。
+		var best *Account
+		bestActive := 0
+		n := len(p.accounts)
+		for i := 0; i < n; i++ {
+			a := p.accounts[(p.pickLeast+i)%n]
+			if !available(a) {
+				continue
+			}
+			a.mu.Lock()
+			active := a.activeConcurrent
+			a.mu.Unlock()
+			if best == nil || active < bestActive {
+				best, bestActive = a, active
+			}
+		}
+		if best != nil {
+			for i := 0; i < n; i++ {
+				if p.accounts[i] == best {
+					p.pickLeast = (i + 1) % n
+					break
+				}
+			}
+			return best
 		}
 		return nil
 	}

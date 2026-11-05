@@ -21,7 +21,7 @@ type Snapshot struct {
 	APIKey            string
 	AdminKey          string
 	DefaultModel      string
-	AccountStrategy   string        // 无会话绑定时：first / credits / round_robin
+	AccountStrategy   string        // 无会话绑定时：first / credits / round_robin / least_active
 	SoftCooldown      time.Duration // 429 软冷却时长
 	ErrThreshold      int           // 连续错误阈值
 	ErrCooldown       time.Duration // 错误冷却时长

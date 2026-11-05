@@ -256,7 +256,7 @@ curl http://127.0.0.1:7866/v1/chat/completions \
 | `auth_dir` | `./auths` | CodeArts 凭据目录 |
 | `state_file` | `./data/state.json` | 账号池状态 |
 | `default_model` | `glm-5.2` | 请求省略模型时的默认值 |
-| `account_strategy` | `first` | 无会话绑定时选号：`first` 第一个可用账号、`credits` 已缓存积分最多、`round_robin` 账号池轮询；积分未知不视为 0，全部未知时取第一个 |
+| `account_strategy` | `first` | 无会话绑定时选号：`first` 第一个可用账号、`credits` 已缓存积分最多、`round_robin` 账号池轮询、`least_active` 在途请求最少（平局按游标轮转，多账号池推荐）；积分未知不视为 0，全部未知时取第一个 |
 | `max_concurrent` | `2` | 单账号并发上限（上游单账号上限 3，留一个槽位余量） |
 | `cooldown.soft_rate` | `60s` | 临时限流冷却 |
 | `cooldown.err_threshold` | `3` | 连续错误阈值 |

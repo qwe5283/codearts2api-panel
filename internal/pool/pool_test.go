@@ -197,3 +197,91 @@ func TestSetKeepaliveWindowHotUpdate(t *testing.T) {
 		t.Fatalf("window not stored: %s", p.keepaliveWindow())
 	}
 }
+
+// least_active 策略：并发相同（都空闲）时按游标严格轮转，不能永远压第一个账号。
+func TestPickExcludingLeastActiveRotatesAcrossHealthyAccounts(t *testing.T) {
+	p, err := New([]*auth.Auth{
+		auth.New("u1", "u1", "d", "tok1", "ak1", "sk1", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+		auth.New("u2", "u2", "d", "tok2", "ak2", "sk2", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+		auth.New("u3", "u3", "d", "tok3", "ak3", "sk3", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+	}, Config{MaxConcurrent: 5}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for i := 0; i < 6; i++ {
+		a := p.PickExcluding(nil, "least_active")
+		if a == nil {
+			t.Fatalf("第 %d 次挑选返回 nil", i+1)
+		}
+		order = append(order, a.Name)
+	}
+	want := []string{"u1", "u2", "u3", "u1", "u2", "u3"}
+	for i := range want {
+		if order[i] != want[i] {
+			t.Fatalf("空闲账号之间应严格轮转：got=%v want=%v", order, want)
+		}
+	}
+}
+
+// least_active 策略：优先挑在途请求最少的账号（把 u1 占两个槽位后必须只选 u2）。
+func TestPickExcludingLeastActivePrefersLeastLoaded(t *testing.T) {
+	p, err := New([]*auth.Auth{
+		auth.New("u1", "u1", "d", "tok1", "ak1", "sk1", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+		auth.New("u2", "u2", "d", "tok2", "ak2", "sk2", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+	}, Config{MaxConcurrent: 5}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.AcquireLock("u1") || !p.AcquireLock("u1") {
+		t.Fatal("应在 MaxConcurrent=5 下拿到 u1 的槽位")
+	}
+	defer p.ReleaseLock("u1")
+	defer p.ReleaseLock("u1")
+	for i := 0; i < 3; i++ {
+		a := p.PickExcluding(nil, "least_active")
+		if a == nil {
+			t.Fatal("挑选返回 nil")
+		}
+		if a.Name != "u2" {
+			t.Fatalf("应当优先选空闲的 u2，got=%s", a.Name)
+		}
+	}
+}
+
+// least_active 策略必须遵守 tried 与 eligible 语义，全被排除时返回 nil。
+func TestPickExcludingLeastActiveRespectsTriedAndEligible(t *testing.T) {
+	p, err := New([]*auth.Auth{
+		auth.New("u1", "u1", "d", "tok1", "ak1", "sk1", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+		auth.New("u2", "u2", "d", "tok2", "ak2", "sk2", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+		auth.New("u3", "u3", "d", "tok3", "ak3", "sk3", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+	}, Config{MaxConcurrent: 5}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.PickExcluding(map[string]bool{"u1": true, "u2": true}, "least_active"); got == nil || got.Name != "u3" {
+		t.Fatalf("应跳过 tried 里的账号，只选 u3：%v", got)
+	}
+	// 单账号池行为必须与 first 一致。
+	single, err := New([]*auth.Auth{
+		auth.New("solo", "solo", "d", "tok", "ak", "sk", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+	}, Config{MaxConcurrent: 5}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if got := single.PickExcluding(nil, "least_active"); got == nil || got.Name != "solo" {
+			t.Fatalf("单账号池应始终返回 solo，got=%v", got)
+		}
+	}
+	if got := single.PickExcluding(map[string]bool{"solo": true}, "least_active"); got != nil {
+		t.Fatalf("唯一账号被 tried 排除后应返回 nil，got=%v", got.Name)
+	}
+	// 全部冷却时也不许返回不健康账号。
+	for _, a := range p.Accounts() {
+		a.coolUntil = time.Now().Add(time.Hour)
+	}
+	if got := p.PickExcluding(nil, "least_active"); got != nil {
+		t.Fatalf("全部冷却时应返回 nil，got=%v", got.Name)
+	}
+}
