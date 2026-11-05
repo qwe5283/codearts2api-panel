@@ -127,11 +127,7 @@ func (h *Handler) noteError(name string) {
 	h.cfg.Pool.NoteError(name, s.ErrThreshold, s.ErrCooldown)
 }
 
-// cooldownErr / cooldownSoft 用当前（可热改）冷却时长处罚账号。
-func (h *Handler) cooldownErr(name, reason string) {
-	h.cfg.Pool.Cooldown(name, pool.CoolErr, h.live().ErrCooldown, reason)
-}
-
+// cooldownSoft 用当前（可热改）软限流冷却时长处罚账号。
 func (h *Handler) cooldownSoft(name, reason string) {
 	h.cfg.Pool.Cooldown(name, pool.CoolSoft, h.live().SoftCooldown, reason)
 }
@@ -532,7 +528,16 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 
 // modelList 动态获取模型列表并包装成 OpenAI 格式。
 func (h *Handler) modelList(force bool) []map[string]any {
-	return modelEntries(h.fetchDynamicModels(force))
+	entries := modelEntries(h.fetchDynamicModels(force))
+	// 隐藏「所有健康账号都实测调不通」的模型：客户端点开就是 404，列出来只会误导。
+	// 还没结论的保留：宁可让用户试，也别把可用模型藏起来。
+	kept := entries[:0]
+	for _, e := range entries {
+		if id, _ := e["id"].(string); !h.modelKnownUnusable(id) {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // modelEntries 把账号模型目录包装成 OpenAI /v1/models 条目。
@@ -687,6 +692,9 @@ func (h *Handler) pickByCatalog(tried map[string]bool, wantLower string) *pool.A
 	candidates := map[string]bool{}
 	for _, acct := range h.cfg.Pool.Accounts() {
 		if models, known := upstream.AccountModels(acct.UID); known && catalogHas(models, wantLower) {
+			if st, _ := modelAvailability(acct.UID, wantLower); st == availUnusable {
+				continue // 该账号实测调不通这个模型，别选它
+			}
 			candidates[acct.Name] = true
 		}
 	}
@@ -1142,9 +1150,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					writeOpenAIError(w, http.StatusServiceUnavailable, "client_cancelled", "client disconnected")
 					return
 				}
-				if isParamInvalidError(serr) {
-					// Client request-param problem: rotating accounts yields the same 400,
-					// and cooling accounts takes down the whole pool for minutes.
+				if isRequestContentError(serr) {
+					// 请求内容问题（参数/多模态/长度）：换账号结果相同，冷却账号还会拖垮整池。
 					writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
 						"upstream rejected request params: "+truncateMsg(serr.Error(), errorTextLimit))
 					return
@@ -1158,6 +1165,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
+			// 真实调用成功：记下「这个账号能用这个模型」。
+			markUsable(acct.UID, model)
 			w.Header().Set("X-Codearts-Chat-Id", chatID)
 
 			storeChat := func() {
@@ -1192,7 +1201,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					event.Outcome = reqlog.OutcomeStreamError
 					event.Error = werr.Error()
 					log.Printf("chat stream account=%s error: %v", acct.Name, werr)
-					if !clientGone(r) && !isParamInvalidError(werr) {
+					// 只有账号侧故障才累计错误：请求内容/模型级错误换账号也一样，
+					// 客户端自己断开更不是账号的错。
+					if !clientGone(r) && classifyUpstreamError(werr) == classAccountFault {
 						h.noteError(acct.Name)
 					}
 				} else {
@@ -1212,13 +1223,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					writeOpenAIError(w, http.StatusServiceUnavailable, "client_cancelled", "client disconnected")
 					return
 				}
-				if isParamInvalidError(aerr) {
+				if isRequestContentError(aerr) {
 					writeOpenAIError(w, http.StatusBadRequest, "invalid_request",
 						"upstream rejected request params: "+truncateMsg(aerr.Error(), errorTextLimit))
 					return
 				}
 				lastErr = aerr
-				h.cooldownErr(acct.Name, aerr.Error())
+				// 聚合路径原本对任何错误都无条件冷却账号：一个嵌在 200 SSE 里的
+				// not registered 也会把健康账号打进 10 分钟冷却。与 chat 开流前、
+				// 流式两条路径共用 handleUpstreamError 的同一套处置。
+				if h.handleUpstreamError(acct, model, aerr) {
+					writeOpenAIError(w, http.StatusNotFound, "model_not_available",
+						"model "+model+" is not available: "+truncateMsg(aerr.Error(), errorTextLimit))
+					return
+				}
 				continue
 			}
 
@@ -1536,35 +1554,26 @@ func buildCompletion(model, reasoning, content string, calls []openAIToolCall, f
 	return resp
 }
 
-// upstreamUnavailableReason 把上游错误归类为「该模型对这个账号不可用」，否则返回空串。
-func upstreamUnavailableReason(err error) string {
-	if err == nil {
-		return ""
-	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "002002009") || strings.Contains(msg, "not registered") {
-		return "模型未在当前账号注册"
-	}
-	return ""
-}
-
 // handleUpstreamError 记录错误并决定是否处罚账号。
 // 返回 true 表示这是「模型对这个账号不可用」的模型级错误：调用方应立即结束
 // 轮转并向客户端返回明确错误（换账号也是同样的结果）。
 func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err error) bool {
-	if isParamInvalidError(err) {
+	switch classifyUpstreamError(err) {
+	case classRequestContent:
 		return false
+	case classModelUnusable:
+		// 「模型对这个账号不可用」是账号能力问题，不是账号故障，必须在状态码分支
+		// **之前**判断：not registered 会被嵌入错误包装成 5xx，落到下面的
+		// `ae.Status >= 500` 就把健康账号冷却 10 分钟——实测调用一个未注册模型，
+		// 整个账号被冷却，后续正常请求全部失败。放在 errors.As 之外，
+		// 流式路径的 UpstreamError 与聚合错误也能命中。
+		reason := upstreamUnavailableReason(err)
+		markUnusable(acct.UID, model, reason)
+		log.Printf("model unusable account=%s model=%s: %s", acct.Name, model, reason)
+		return true
 	}
 	var ae *upstream.ApiError
 	if errors.As(err, &ae) {
-		// 「模型对这个账号不可用」是账号能力问题，不是账号故障，必须在状态码分支
-		// **之前**判断：not registered 会被嵌入错误包装成
-		// 5xx，落到下面的 `ae.Status >= 500` 就把健康账号冷却 10 分钟——实测
-		// 调用一个未注册模型，整个账号被冷却，后续正常请求全部失败。
-		if reason := upstreamUnavailableReason(err); reason != "" {
-			log.Printf("model unusable account=%s model=%s: %s", acct.Name, model, reason)
-			return true
-		}
 		switch {
 		case ae.Status == 401 || ae.Code == 401:
 			h.cfg.Pool.Disable(acct.Name, "401 "+ae.Message)
@@ -1574,9 +1583,10 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err erro
 			// 并发会话上限（TM.00001041）是瞬时错误：上游会话槽位会被其他请求释放，
 			// 不冷却账号——池的并发锁已防止过载，冷却反而误伤后续请求。
 			log.Printf("upstream concurrent limit (transient) account=%s msg=%s", acct.Name, truncateMsg(ae.Message, 80))
-		case ae.Status >= 500:
-			h.cooldownErr(acct.Name, ae.Error())
 		default:
+			// 5xx 也是「累计到阈值才冷却」：实测 ModelArts.81104（Conversion failed）
+			// 是间歇性的——同一请求重发即成功。一个 5xx 就冷却 10 分钟的话，
+			// 一次抖动就能打瘫整池；真正的账号故障会连续失败，照样被阈值拦下。
 			h.noteError(acct.Name)
 		}
 		return false
@@ -1590,42 +1600,6 @@ func (h *Handler) handleUpstreamError(acct *pool.Account, model string, err erro
 // （2026-11-03 线上实测：客户端超时/回压交替把两个账号互相打进冷却）。
 func clientGone(r *http.Request) bool {
 	return r != nil && r.Context().Err() != nil
-}
-
-// isParamInvalidError 判断是否为上游「请求参数无效/模型能力不匹配」类错误。
-// 这类错误由请求内容决定：换账号结果相同，绝不能冷却账号（曾因此打停整池）。
-func isParamInvalidError(err error) bool {
-	if err == nil {
-		return false
-	}
-	var apiErr *upstream.ApiError
-	var streamErr *upstream.UpstreamError
-	var message string
-	switch {
-	case errors.As(err, &apiErr):
-		message = apiErr.Message
-	case errors.As(err, &streamErr):
-		message = streamErr.Code + " " + streamErr.Msg
-	default:
-		return false
-	}
-	low := strings.ToLower(message)
-	// 这一类错误的共同点：由请求内容决定，换账号/重试结果相同，而冷却账号会把整池
-	// 打停 10 分钟（上游常把它们包成 HTTP 502，落进 handleUpstreamError 的
-	// Status>=500 分支）。逐条：
-	//   InferHub.001001005 / request param is invalid —— 参数形状错；
-	//   InferHub.001001020 / request model is not multimodal —— 带图打到纯文本模型；
-	//   InferHub.001001046 —— 多模态内容格式不正确；
-	//   ModelArts.81029 / media conversion failed —— 图片超出媒体转换上限
-	//     （downstream returned 413）；
-	//   ModelArts.81001 / prompt length exceeds —— 请求超出该模型的上下文：
-	//     同一个超长请求打 1M 上下文的 deepseek 成功、打 131k 的 qwen3-vl 报 81001，
-	//     是「这个模型装不下」，不是账号坏了。
-	return strings.Contains(low, "inferhub.001001005") || strings.Contains(low, "request param is invalid") ||
-		strings.Contains(low, "inferhub.001001020") || strings.Contains(low, "request model is not multimodal") ||
-		strings.Contains(low, "inferhub.001001046") ||
-		strings.Contains(low, "modelarts.81029") || strings.Contains(low, "media conversion failed") ||
-		strings.Contains(low, "modelarts.81001") || strings.Contains(low, "prompt length exceeds")
 }
 
 // isConcurrentLimitError 判断是否为上游并发会话上限错误（瞬时、可重试）。

@@ -70,3 +70,23 @@ func TestChatCompletionsOther502StillCools(t *testing.T) {
 		t.Fatalf("普通 502 不应失去冷却行为：status=%d healthy=%d disabled=%d cooling=%d", rec.Code, healthy, disabled, cooling)
 	}
 }
+
+// 非流式（聚合）路径：流中途出现的「模型未注册」不得冷却账号，应直接回 404。
+// 原实现对任何聚合错误都无条件冷却账号，与开流前/流式路径的处置不一致。
+func TestAggregateModelNotRegisteredDoesNotCoolAccount(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// 首帧正常（过了开流前的 preflight），错误出现在流中途：只有聚合路径能看到它。
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"}}]}\n\n"+
+			"data: {\"error_code\":\"InferHub.002002009.404\",\"error_msg\":\"The model is not registered, please request other model\"}\n\ndata: [DONE]\n\n")
+	}))
+	defer backend.Close()
+	h, p := toolChoiceTestHandler(t, backend.URL)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"stream":false,"messages":[{"role":"user","content":"hi"}]}`)))
+	_, healthy, _, cooling, _ := p.Stats()
+	if rec.Code != http.StatusNotFound || cooling != 0 || healthy != 2 {
+		t.Fatalf("模型级错误不应冷却账号：status=%d healthy=%d cooling=%d body=%s", rec.Code, healthy, cooling, rec.Body.String())
+	}
+}
