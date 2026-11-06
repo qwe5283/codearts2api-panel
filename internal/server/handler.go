@@ -600,8 +600,11 @@ func modelEntries(infos []upstream.ModelInfo) []map[string]any {
 		if mi.DisplayEnabled != nil && !*mi.DisplayEnabled {
 			entry["display_enabled"] = false
 		}
-		if mi.SupportsImages != nil && *mi.SupportsImages {
-			entry["supports_images"] = true
+		// 图片能力三态都透传：true 告诉客户端可以发图，false（上游明确声明不支持）
+		// 告诉客户端必须先转文字；只有上游没表态才不写。只透传 true 会把「明确
+		// 不支持」静默成「没这个字段」，客户端只能靠撞 001001020 才发现。
+		if mi.SupportsImages != nil {
+			entry["supports_images"] = *mi.SupportsImages
 		}
 		out = append(out, entry)
 	}
@@ -926,8 +929,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   ③ 识图桥接（默认）：目标模型在本上游是纯文本时，先用 VL 模型把图转述成
 	//      文字，否则上游直接回 InferHub.001001020.406（非多模态）。
 	multi := h.liveMultimodal(h.live())
-	if multi.ImageShrinkEnabled {
-		shrinkMessageImages(req, multi.ImageShrink, int64(len(body)))
+	if multi.ImageShrinkEnabled && hasImageBlocks(req) {
+		if st := shrinkMessageImages(req, multi.ImageShrink, int64(len(body))); st.Changed {
+			log.Printf("image shrink images=%d before=%d after=%d", st.Images, st.Before, st.After)
+		}
 	}
 	// passthrough：不替调用方做任何决策，明确回 400 并列出可用的视觉模型。
 	// 刻意不做自动改派——视觉模型上下文普遍更小（实测 deepseek 1M vs qwen3-vl 131k），
@@ -945,10 +950,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// analyze 模式：图片换成占位符 + 注入 analyze_image 工具，主模型按需调用。
 	// 与 bridge 互斥——analyze 后请求里已无图片，bridge 分支自然不触发。
 	// 仅对「目录明确声明不支持图片」的模型生效；未声明时无依据，照原样放行。
-	if multi.ImageHandling == "analyze" && !analyzeRouted && hasImageBlocks(req) && h.catalogDeclaresNoImages(model) {
+	if multi.ImageHandling == "analyze" && hasImageBlocks(req) && h.catalogDeclaresNoImages(model) {
+		// 目录里没有任何视觉模型时改写只会让主模型调一个注定失败的工具：
+		// 明确回 400，与 passthrough 的口径一致。
+		if h.visionModelForAnalyze() == "" {
+			writeOpenAIError(w, http.StatusBadRequest, "model_not_multimodal",
+				"model "+model+" does not accept image input, and no vision model is available for analyze mode")
+			return
+		}
 		if injected := rewriteImagesForAnalyze(req); len(injected) > 0 {
 			req.Tools = append(req.Tools, injected...)
 			analyzeRouted = true
+			// toolsOn 在注入前算过：客户端本来没带工具时它是 false，聚合路径就不会
+			// 走文本协议兜底，模型把 analyze_image 写进正文（而非原生 tool_calls）时
+			// 调用会被当成普通文本返回。注入后必须重算。
+			toolsOn = toolsActive(req)
 			// 工具列表在图片改写之前就已构建，注入 analyze_image 后必须重建，
 			// 否则主模型根本看不到这个工具。
 			if tools, err = nativeTools(req.Tools, req.ToolChoice); err != nil {

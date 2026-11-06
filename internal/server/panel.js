@@ -218,7 +218,7 @@
       const tip = [m.model_desc, m.notice].filter(Boolean).join('\n');
       const title = tip ? ' title="' + esc(tip).replace(/\n/g, '&#10;') + '"' : '';
       // 徽标行：上游标签（紫）、被隐藏的模型（橘）、输入模态（绿＝视觉理解 / 灰＝纯文本）。
-      // 上游只在支持图片时才回 supports_images，因此「不是 true」就是纯文本；
+      // supports_images 为 true 才是视觉模型；false（明确不支持）与缺省（未声明）都按纯文本显示；
       // 纯文本模型在视觉转述启用时再挂黄色「外置视觉理解」，与原生视觉能力区分。
       const badges = [
         m.model_tag ? '<span class="pill tag">' + esc(m.model_tag) + '</span>' : '',

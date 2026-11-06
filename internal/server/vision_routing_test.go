@@ -192,9 +192,9 @@ func TestModelEntriesExposeImageCapability(t *testing.T) {
 	if mods, _ := byID["vision-model"]["input_modalities"].([]string); len(mods) != 2 || mods[1] != "image" {
 		t.Errorf("视觉模型的 input_modalities 应含 image，got=%#v", byID["vision-model"]["input_modalities"])
 	}
-	// 显式声明不支持 / 未声明的模型：都不写 supports_images（客户端按「非 true 即纯文本」判断）。
-	if _, ok := byID["text-model"]["supports_images"]; ok {
-		t.Error("未声明支持图片时不应写 supports_images")
+	// 上游明确声明不支持：必须透传 false，客户端才知道要先转文字。
+	if v, ok := byID["text-model"]["supports_images"]; !ok || v != false {
+		t.Errorf("纯文本模型必须透传 supports_images=false，got=%#v", byID["text-model"]["supports_images"])
 	}
 	if _, ok := byID["unknown-model"]["supports_images"]; ok {
 		t.Error("上游未声明时不应凭空写入 supports_images")
