@@ -39,6 +39,33 @@ func TestNormalizeRewritesInvalidRetryAndCooldownValues(t *testing.T) {
 	}
 }
 
+func TestSessionTTLAndReserveCreditsConfig(t *testing.T) {
+	t.Setenv("CA2A_API_KEY", "test-key")
+	t.Setenv("CA2A_SESSION_TTL", "")
+	t.Setenv("CA2A_RESERVE_CREDITS", "")
+	cfg, err := Load("")
+	if err != nil || cfg.SessionTTL != "30m" || cfg.ReserveCredits != 100 {
+		t.Fatalf("defaults: cfg=%+v err=%v", cfg, err)
+	}
+	if got := liveSnapshot(cfg).SessionTTL; got != 30*time.Minute {
+		t.Fatalf("default live TTL=%s", got)
+	}
+	t.Setenv("CA2A_SESSION_TTL", "45m")
+	t.Setenv("CA2A_RESERVE_CREDITS", "12.5")
+	cfg, err = Load("")
+	if err != nil || cfg.SessionTTL != "45m" || cfg.ReserveCredits != 12.5 || cfg.ToPoolConfig().ReserveCredits != 12.5 {
+		t.Fatalf("environment/config wiring failed: cfg=%+v err=%v", cfg, err)
+	}
+	if got := liveSnapshot(cfg).SessionTTL; got != 45*time.Minute {
+		t.Fatalf("live TTL=%s", got)
+	}
+	t.Setenv("CA2A_RESERVE_CREDITS", "0")
+	cfg, err = Load("")
+	if err != nil || cfg.ReserveCredits != 0 {
+		t.Fatalf("explicit zero must disable reserve credits: cfg=%+v err=%v", cfg, err)
+	}
+}
+
 func TestAccountStrategyConfigAndLiveSnapshot(t *testing.T) {
 	for _, strategy := range []string{"first", "credits", "round_robin"} {
 		c := Default()

@@ -53,8 +53,10 @@ type Config struct {
 		KeepaliveInterval int  `json:"keepalive_interval_minutes"` // 保活心跳间隔（新增）
 	} `json:"watch"`
 
-	MaxConcurrent   int    `json:"max_concurrent"`   // 单账号最大并发数（新增）
-	KeepaliveWindow string `json:"keepalive_window"` // 保活窗口（新增）
+	MaxConcurrent   int     `json:"max_concurrent"`   // 单账号最大并发数
+	KeepaliveWindow string  `json:"keepalive_window"` // 保活窗口
+	SessionTTL      string  `json:"session_ttl"`      // 软粘性空闲有效期，默认 30m
+	ReserveCredits  float64 `json:"reserve_credits"`  // 已知余额不超过此值停止接单；0 关闭
 
 	// ModelRefreshMinutes 模型目录后台续期巡检间隔（分钟，默认 60）。
 	// 账号目录缓存 23h，这里决定「过期前多久巡检一次」；0/负数按默认 60 处理。
@@ -131,6 +133,8 @@ func Default() *Config {
 		StateFile:       "./data/state.json",
 		DefaultModel:    "glm-5.2",
 		AccountStrategy: "first",
+		SessionTTL:      "30m",
+		ReserveCredits:  100,
 	}
 	c.Cooldown.SoftRate = defaultSoftRate
 	c.Cooldown.ErrThresh = defaultErrThreshold
@@ -312,6 +316,14 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("CA2A_KEEPALIVE_WINDOW"); v != "" {
 		c.KeepaliveWindow = v
 	}
+	if v := os.Getenv("CA2A_SESSION_TTL"); v != "" {
+		c.SessionTTL = v
+	}
+	if v := os.Getenv("CA2A_RESERVE_CREDITS"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil {
+			c.ReserveCredits = n
+		}
+	}
 	if v := os.Getenv("CA2A_LOGIN_CLIENT_ID"); v != "" {
 		c.LoginClientID = v
 	}
@@ -393,6 +405,12 @@ func (c *Config) validate() error {
 	if c.MaxConcurrent < 1 {
 		return fmt.Errorf("max_concurrent must be positive")
 	}
+	if duration, err := time.ParseDuration(c.SessionTTL); err != nil || duration <= 0 {
+		return fmt.Errorf("session_ttl must be a positive duration")
+	}
+	if c.ReserveCredits < 0 {
+		return fmt.Errorf("reserve_credits must not be negative")
+	}
 	// 重试与冷却的取值不在这里拦：normalize 已把 0/负数/解析不了的值回写成默认值，
 	// 拒绝保存只会让「填了 0」的人卡在 400 上，反而看不到真实生效的是什么。
 	return nil
@@ -471,6 +489,14 @@ func (c *Config) normalize() []string {
 	}
 	if c.MaxConcurrent <= 0 {
 		c.MaxConcurrent = 2 // 上游单账号并发会话上限 3 且释放慢，留一个槽位余量
+	}
+	if duration, err := time.ParseDuration(c.SessionTTL); err != nil || duration <= 0 {
+		changes = append(changes, fmt.Sprintf("session_ttl=%q → 30m", c.SessionTTL))
+		c.SessionTTL = "30m"
+	}
+	if c.ReserveCredits < 0 {
+		changes = append(changes, fmt.Sprintf("reserve_credits=%g → 0", c.ReserveCredits))
+		c.ReserveCredits = 0
 	}
 	// 签到时点：非法值全部滤掉；一个都不剩就回落默认 [9, 21]（与「不配置」同义）。
 	if hours := validHours(c.CheckinHours); len(hours) > 0 {
@@ -553,5 +579,6 @@ func (c *Config) ToPoolConfig() pool.Config {
 		RefreshSkew:     time.Duration(c.Watch.RefreshSkewM) * time.Minute,
 		MaxConcurrent:   c.MaxConcurrent,
 		KeepaliveWindow: dur,
+		ReserveCredits:  c.ReserveCredits,
 	}
 }

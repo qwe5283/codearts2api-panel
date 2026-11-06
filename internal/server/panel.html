@@ -307,7 +307,7 @@
               </div>
               <h3 class="group-title">并发与队列</h3>
               <div class="field-grid">
-                <div><label for="cfgAccountStrategy">选号策略 <span class="muted">（粘性会话仍优先；积分策略读取已缓存余额，不额外查询上游；未知积分不参与比较。）</span></label><select
+                <div><label for="cfgAccountStrategy">选号策略 <span class="muted">（粘性会话有空槽时优先；所有策略都会跳过满槽账号。积分策略读取缓存，不额外查询上游。）</span></label><select
                     id="cfgAccountStrategy">
                     <option value="first">第一个可用账号</option>
                     <option value="credits">积分最多的账号</option>
@@ -319,6 +319,9 @@
                     step="1"></div>
                 <div><label for="cfgKeepaliveWindow">保活窗口</label><input id="cfgKeepaliveWindow" autocomplete="off"
                     placeholder="10m"></div>
+                <div><label for="cfgSessionTTL">粘性会话空闲 TTL <span class="muted">（到期后重新分配；满槽时立即软切换）</span></label><input id="cfgSessionTTL" autocomplete="off"
+                    placeholder="30m"></div>
+                <div><label for="cfgReserveCredits">保留积分 <span class="muted">（已知余额不超过该值停止接单；0 关闭，未知余额不拦截）</span></label><input id="cfgReserveCredits" type="number" min="0" step="any" placeholder="100"></div>
                 <div><label for="cfgQueueRetrySeconds">排队重试间隔（秒） <span
                       class="muted">（上游排队/限流后隔多久重试）</span></label><input id="cfgQueueRetrySeconds" type="number" min="0"
                     step="1" placeholder="10"></div>

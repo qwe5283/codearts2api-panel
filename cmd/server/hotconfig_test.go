@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +12,14 @@ import (
 	"codearts2api-panel/internal/pool"
 	"codearts2api-panel/internal/reqlog"
 	"codearts2api-panel/internal/scheduler"
+	"codearts2api-panel/internal/upstream"
 )
+
+type fixedBalanceClient float64
+
+func (c fixedBalanceClient) FetchAccountInfo(context.Context, upstream.SignCredential) (*upstream.CreditBalance, error) {
+	return &upstream.CreditBalance{Total: float64(c)}, nil
+}
 
 // 只有装配期依赖的四个字段需要重启，其余都必须热生效。
 func TestRestartRequiredFieldsAreAssemblyTimeOnly(t *testing.T) {
@@ -41,15 +49,20 @@ func TestApplyHotConfigUpdatesLiveAndPool(t *testing.T) {
 	c.QueueMaxAttempts = 7
 	c.KeepaliveWindow = "5m"
 	c.MaxConcurrent = 2
+	c.SessionTTL = "15m"
+	c.ReserveCredits = 12.5
 	c.LoginClientID = "client-hot"
 	c.OAuthCallbackHost = "https://example.com/cb"
 	c.RequestLogRetentionDays = 7
 
-	p, err := pool.New(nil, pool.Config{MaxConcurrent: 1}, "")
+	p, err := pool.New(nil, pool.Config{MaxConcurrent: 1, BalanceClient: fixedBalanceClient(5)}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	p.AddAccount(auth.New("u1", "n1", "d1", "tok", "ak", "sk", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""))
+	if _, err := p.RefreshBalance(context.Background(), "u1"); err != nil {
+		t.Fatal(err)
+	}
 	sch := scheduler.New(scheduler.Config{Pool: p, Enabled: true, PollInterval: time.Hour})
 	live := livecfg.New(livecfg.Snapshot{APIKey: "api-1", DefaultModel: "model-old"})
 	logs := reqlog.New(reqlog.Config{Enabled: true, Dir: t.TempDir(), RetentionDays: 30})
@@ -70,6 +83,9 @@ func TestApplyHotConfigUpdatesLiveAndPool(t *testing.T) {
 	if snap.QueueRetryDelay != 3*time.Second || snap.QueueMaxAttempts != 7 {
 		t.Fatalf("queue settings not applied: %+v", snap)
 	}
+	if snap.SessionTTL != 15*time.Minute {
+		t.Fatalf("session TTL not applied: %+v", snap)
+	}
 	if snap.SoftCooldown != 90*time.Second || snap.ErrCooldown != 15*time.Minute || snap.ErrThreshold != 4 {
 		t.Fatalf("cooldown settings not applied: %+v", snap)
 	}
@@ -80,6 +96,9 @@ func TestApplyHotConfigUpdatesLiveAndPool(t *testing.T) {
 		if row["max_concurrent"] != 2 {
 			t.Fatalf("pool max_concurrent not hot-updated: %+v", row)
 		}
+	}
+	if got := p.PickExcluding(nil, "first"); got != nil {
+		t.Fatalf("reserve_credits=12.5 must stop account with cached balance 5: %+v", got)
 	}
 }
 

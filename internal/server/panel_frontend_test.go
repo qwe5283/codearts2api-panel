@@ -80,6 +80,11 @@ func TestPanelMarkupMatchesScriptBindings(t *testing.T) {
 	if !strings.Contains(panelJS, `['cfgAccountStrategy', 'account_strategy', 'text']`) {
 		t.Error("account strategy select is not bound to configuration")
 	}
+	for _, binding := range []string{"['cfgSessionTTL', 'session_ttl', 'text']", "['cfgReserveCredits', 'reserve_credits', 'float']"} {
+		if !strings.Contains(panelJS, binding) {
+			t.Errorf("missing scheduling configuration binding %q", binding)
+		}
+	}
 	if strings.Contains(panelHTMLRaw, "<script>") || regexp.MustCompile(`\bon(click|submit|load)=`).MatchString(panelHTMLRaw) {
 		t.Fatal("inline script bypasses the panel CSP")
 	}

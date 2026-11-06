@@ -84,6 +84,7 @@ func (h *Handler) adminDelete(w http.ResponseWriter, r *http.Request) {
 	for conversation, account := range h.convAcct {
 		if account == body.UID {
 			delete(h.convAcct, conversation)
+			delete(h.convSeen, conversation)
 		}
 	}
 	h.convMu.Unlock()

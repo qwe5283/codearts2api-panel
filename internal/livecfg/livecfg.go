@@ -27,6 +27,7 @@ type Snapshot struct {
 	ErrCooldown       time.Duration // 错误冷却时长
 	QueueRetryDelay   time.Duration // 上游排队重试间隔
 	QueueMaxAttempts  int           // 上游排队重试次数上限
+	SessionTTL        time.Duration // 软粘性绑定的空闲有效期，默认 30 分钟
 	OAuthCallbackHost string        // 授权回调 host 覆盖
 	LoginClientID     string        // WebUI 登录 client_id
 

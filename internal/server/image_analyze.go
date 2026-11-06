@@ -233,17 +233,12 @@ func (h *Handler) runAnalyzeTool(ctx context.Context, argsJSON string) (string, 
 
 // describeImage 用视觉模型分析单张图片。
 func (h *Handler) describeImage(ctx context.Context, model string, img storedImage, task string) (string, error) {
-	acct := h.pickAccount(map[string]bool{}, model)
-	if acct == nil {
-		return "", fmt.Errorf("no account can serve vision model %s", model)
-	}
-	// 并发槽位：拿不到就让这次识图失败，由调用方（工具回灌或桥接）按"图片原样
-	// 保留"处理。识图是子请求，宁可明确失败也不要长时间死等 —— 唯一例外是撞上
-	// 上游「并发会话数已达上限」（见下面重试循环），那属于瞬时占用，等一轮再试。
+	// 拿不到槽位就让这次识图失败，由调用方按“图片原样保留”处理。
 	// held 必须显式跟踪：排队重试时会先让出槽位再重新获取，失败时若还盲目
 	// Release，会把别人正在用的槽位减掉（计数器是账号级的，不分持有者）。
 	held := false
-	if !h.cfg.Pool.AcquireLockWaitContext(ctx, acct.Name, visionSlotWait) {
+	acct := h.acquireAuxiliarySlot(ctx, visionSlotWait, model)
+	if acct == nil {
 		return "", fmt.Errorf("vision model %s busy: no free slot", model)
 	}
 	held = true
@@ -289,7 +284,8 @@ func (h *Handler) describeImage(ctx context.Context, model string, img storedIma
 				}
 				select {
 				case <-time.After(visionQueueRetryDelay):
-					if !h.cfg.Pool.AcquireLockWaitContext(ctx, acct.Name, visionSlotWait) {
+					acct = h.acquireAuxiliarySlot(ctx, visionSlotWait, model)
+					if acct == nil {
 						return "", fmt.Errorf("vision model %s busy: no free slot", model)
 					}
 					held = true

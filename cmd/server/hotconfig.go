@@ -25,6 +25,10 @@ func liveSnapshot(c *Config) livecfg.Snapshot {
 	if c.QueueRetrySeconds > 0 {
 		delay = time.Duration(c.QueueRetrySeconds) * time.Second
 	}
+	ttl, err := time.ParseDuration(c.SessionTTL)
+	if err != nil || ttl <= 0 {
+		ttl = 30 * time.Minute
+	}
 	return livecfg.Snapshot{
 		APIKey:            c.APIKey,
 		AdminKey:          c.AdminKey,
@@ -35,6 +39,7 @@ func liveSnapshot(c *Config) livecfg.Snapshot {
 		ErrCooldown:       c.ErrCooldownDur,
 		QueueRetryDelay:   delay,
 		QueueMaxAttempts:  c.QueueMaxAttempts,
+		SessionTTL:        ttl,
 		OAuthCallbackHost: c.OAuthCallbackHost,
 		LoginClientID:     c.LoginClientID,
 
@@ -87,6 +92,7 @@ func keepaliveWindow(c *Config) time.Duration {
 func applyHotConfig(c *Config, live *livecfg.Holder, p *pool.Pool, sch *scheduler.Scheduler, logs *reqlog.Recorder) []string {
 	live.Store(liveSnapshot(c))
 	p.SetMaxConcurrentAll(c.MaxConcurrent)
+	p.SetReserveCredits(c.ReserveCredits)
 	p.SetKeepaliveWindow(keepaliveWindow(c))
 	p.SetLoginClientID(c.LoginClientID)
 	// 归档清理在后台每秒一轮，这里只换天数，新值一秒内生效。

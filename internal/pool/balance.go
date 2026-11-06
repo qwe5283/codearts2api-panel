@@ -107,6 +107,7 @@ func (p *Pool) RefreshBalance(ctx context.Context, uid string) (BalanceResult, e
 	out := BalanceResult{UID: uid, OK: creditErr == nil, CreditBalance: a.creditBalance, UpdatedAt: optionalTime(a.balanceUpdatedAt), CreditError: a.creditBalanceError}
 	a.mu.Unlock()
 	p.saveState()
+	p.signalScheduleChange() // 余额跨过保留阈值后，等待者可以重新评估该账号
 	// nil 余额表示上游没有 CREDIT 指标，是未知而不是 0；失败时 out 里的缓存也不能采样。
 	if creditErr == nil && credit != nil && p.cfg.BalanceObserver != nil {
 		p.cfg.BalanceObserver.Add(uid, credit.Total)

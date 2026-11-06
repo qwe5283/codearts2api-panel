@@ -625,6 +625,8 @@
     ['cfgAccountStrategy', 'account_strategy', 'text'],
     ['cfgMaxConcurrent', 'max_concurrent', 'int'],
     ['cfgKeepaliveWindow', 'keepalive_window', 'text'],
+    ['cfgSessionTTL', 'session_ttl', 'text'],
+    ['cfgReserveCredits', 'reserve_credits', 'float'],
     ['cfgQueueRetrySeconds', 'queue_retry_seconds', 'int'],
     ['cfgQueueMaxAttempts', 'queue_max_attempts', 'int'],
     ['cfgSoftRate', 'cooldown.soft_rate', 'text'],
@@ -685,11 +687,11 @@
         configPathSet(next, path, hours);
         continue;
       }
-      if (kind === 'int') {
+      if (kind === 'int' || kind === 'float') {
         if (raw === '') continue; // 留空＝沿用原值，免得把必填项清成 0
         const number = Number(raw);
-        if (!Number.isFinite(number)) throw new Error(path + ' 必须是数字');
-        configPathSet(next, path, Math.trunc(number));
+        if (!Number.isFinite(number) || kind === 'int' && !Number.isInteger(number)) throw new Error(path + (kind === 'int' ? ' 必须是整数' : ' 必须是数字'));
+        configPathSet(next, path, kind === 'int' ? Math.trunc(number) : number);
         continue;
       }
       configPathSet(next, path, raw);

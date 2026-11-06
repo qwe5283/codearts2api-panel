@@ -171,6 +171,8 @@ func normalizeSettings(values map[string]any) ([]string, error) {
 	setConfigValue(values, "account_strategy", candidate.AccountStrategy)
 	setConfigValue(values, "queue_retry_seconds", candidate.QueueRetrySeconds)
 	setConfigValue(values, "queue_max_attempts", candidate.QueueMaxAttempts)
+	setConfigValue(values, "session_ttl", candidate.SessionTTL)
+	setConfigValue(values, "reserve_credits", candidate.ReserveCredits)
 	setConfigValue(values, "max_body_mb", candidate.MaxBodyMB)
 	setConfigValue(values, "image_shrink.trigger_body_mb", candidate.ImageShrink.TriggerBodyMB)
 	setConfigValue(values, "image_shrink.target_image_mb", candidate.ImageShrink.TargetImageMB)

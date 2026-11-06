@@ -73,6 +73,59 @@ func TestPickExcludingStrategies(t *testing.T) {
 	}
 }
 
+func TestCapacitySkipsFullStickyAndFallsBack(t *testing.T) {
+	auths := []*auth.Auth{
+		auth.New("a", "a", "domain", "tok", "ak", "sk", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+		auth.New("b", "b", "domain", "tok", "ak", "sk", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+	}
+	p, err := New(auths, Config{MaxConcurrent: 1}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.AcquireLock("a") {
+		t.Fatal("occupy a")
+	}
+	if got := p.PickExcluding(nil, "first"); got == nil || got.Name != "b" {
+		t.Fatalf("full first account must yield to idle account: %+v", got)
+	}
+	if got := p.PickByUID("a"); got != nil {
+		t.Fatalf("full sticky account must be reassignable: %+v", got)
+	}
+	if got := p.PickByUID("b"); got == nil || got.Name != "b" {
+		t.Fatalf("healthy sticky account with capacity must remain usable: %+v", got)
+	}
+}
+
+func TestReserveCreditsStopsKnownLowBalanceButNotUnknown(t *testing.T) {
+	auths := []*auth.Auth{
+		auth.New("low", "low", "domain", "tok", "ak", "sk", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+		auth.New("unknown", "unknown", "domain", "tok", "ak", "sk", time.Now().Add(time.Hour).Format(time.RFC3339), "", ""),
+	}
+	p, err := New(auths, Config{MaxConcurrent: 1, ReserveCredits: 10}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Accounts()[0].creditBalance = &upstream.CreditBalance{Total: 10}
+	p.Accounts()[1].creditBalance = nil
+	if got := p.PickExcluding(nil, "first"); got == nil || got.Name != "unknown" {
+		t.Fatalf("known low balance must stop; unknown balance is not zero: %+v", got)
+	}
+	if got := p.PickByUID("low"); got != nil {
+		t.Fatalf("sticky route must respect reserve credits: %+v", got)
+	}
+	if !p.AcquireLock("low") {
+		t.Fatal("background operations retain their own slot API")
+	}
+	p.ReleaseLock("low")
+	if got := p.PickExcluding(nil, "first"); got == nil || got.Name != "unknown" {
+		t.Fatalf("background slot use must not bypass balance policy: %+v", got)
+	}
+	p.SetReserveCredits(0)
+	if got := p.PickExcluding(nil, "first"); got == nil || got.Name != "low" {
+		t.Fatalf("zero reserve must disable the gate: %+v", got)
+	}
+}
+
 func TestAddAccountInitializesConcurrency(t *testing.T) {
 	p, err := New(nil, Config{MaxConcurrent: 1}, "")
 	if err != nil {

@@ -49,6 +49,7 @@ type Config struct {
 	// 也可能嵌在 HTTP 200 SSE 内。默认每 10s 重试一次、最多 30 次（约 5 分钟）。
 	QueueRetryDelay  time.Duration
 	QueueMaxAttempts int
+	SessionTTL       time.Duration
 	DefaultModel     string
 	ConvStateFile    string
 	WatchInfo        map[string]any
@@ -89,6 +90,7 @@ func (h *Handler) live() livecfg.Snapshot {
 		ErrCooldown:       h.cfg.ErrCooldown,
 		QueueRetryDelay:   h.cfg.QueueRetryDelay,
 		QueueMaxAttempts:  h.cfg.QueueMaxAttempts,
+		SessionTTL:        h.cfg.SessionTTL,
 		OAuthCallbackHost: h.cfg.OAuthCallbackHost,
 		LoginClientID:     h.cfg.LoginConfig.ClientID,
 	}
@@ -174,10 +176,11 @@ type Handler struct {
 	oauth   *oauthStore
 	started time.Time // 进程启动时刻，面板顶栏据此显示运行时长
 
-	convMu sync.Mutex
-	chats  map[string]string // account → 最近 chat_id
-	// 黏性路由：conversation_id → account_name（多轮续接锁定同一账号，减少上游并发会话占用）。
-	convAcct map[string]string
+	convMu     sync.Mutex
+	chats      map[string]string // account → 最近 chat_id
+	convAcct   map[string]string // 软粘性：conversation_id → 最近成功账号
+	convSeen   map[string]time.Time
+	convAssign chan struct{} // 短暂的分配锁；与参考项目的慢路径写锁同构
 
 	loginMu    sync.Mutex
 	logins     map[string]*pendingLogin
@@ -222,6 +225,9 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.DefaultModel == "" {
 		cfg.DefaultModel = "glm-5.2"
 	}
+	if cfg.SessionTTL <= 0 {
+		cfg.SessionTTL = 30 * time.Minute
+	}
 	if cfg.Upstream == nil {
 		cfg.Upstream = upstream.New(120 * time.Second)
 	}
@@ -237,7 +243,7 @@ func NewHandler(cfg Config) *Handler {
 	h := &Handler{
 		cfg: cfg, mux: http.NewServeMux(), oauth: newOAuthStore(), started: time.Now(),
 		chats: map[string]string{}, logins: map[string]*pendingLogin{},
-		convAcct: map[string]string{}, logs: NewRing(500),
+		convAcct: map[string]string{}, convSeen: map[string]time.Time{}, convAssign: make(chan struct{}, 1), logs: NewRing(500),
 		attemptErrs: newAttemptErrors(attemptErrorLimit),
 	}
 	h.loadChats()
@@ -987,12 +993,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 为整条 Agent 工具链固定 CodeArts 内置 chat_id 与账号亲和。V2 接口
 	// 不保留语义上下文，所以每轮仍重放完整 OpenAI 历史。
 	explicitChat := validChatID(req.ConversationID)
-	stickyAcct := ""
-	if explicitChat {
-		h.convMu.Lock()
-		stickyAcct = h.convAcct[req.ConversationID]
-		h.convMu.Unlock()
-	}
 	msgs := buildUpstreamMessages(req, toolsOn)
 
 	tried := map[string]bool{}
@@ -1003,41 +1003,46 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	for {
 		answered := false
 		for i := 0; i < h.cfg.MaxRotate; i++ {
-			var acct *pool.Account
-			if stickyAcct != "" {
-				// 续接会话：锁定原账号（若仍健康）。
-				acct = h.cfg.Pool.Get(stickyAcct)
-				if acct == nil || !h.cfg.Pool.Healthy(stickyAcct) {
-					stickyAcct = ""
-					acct = h.cfg.Pool.PickExcluding(tried, h.live().AccountStrategy)
-				} else {
-					tried[acct.Name] = true
+			// 先扫描全部空闲账号；全池繁忙才等待一次，唤醒后重新扫描。
+			acct := h.acquireConversationSlot(r.Context(), req.ConversationID, explicitChat, 0, tried)
+			slotWaited := false
+			if acct == nil && h.cfg.Pool.AllAccountsFullMatching(tried, nil) {
+				slotWaited = true
+				queueStarted := time.Now()
+				acct = h.acquireConversationSlot(r.Context(), req.ConversationID, explicitChat, localSlotWait, tried)
+				event.QueueMs += time.Since(queueStarted).Milliseconds()
+			}
+			if acct == nil {
+				if clientGone(r) {
+					writeOpenAIError(w, http.StatusServiceUnavailable, "client_cancelled", "client disconnected")
+					return
 				}
-			}
-			if acct == nil {
-				acct = h.cfg.Pool.PickExcluding(tried, h.live().AccountStrategy)
-			}
-			if acct == nil {
+				if slotWaited {
+					writeOpenAIError(w, http.StatusServiceUnavailable, "all_accounts_busy", "all accounts are at concurrent capacity; retry later")
+					return
+				}
 				break
 			}
 			tried[acct.Name] = true
 			event.Account = shortID(acct.UID)
-
-			// 阻塞等待并发槽位（上游单账号并发会话释放慢，串行最稳）。
-			// 超时 180s 排队（5 个请求 × ~30s 上限），避免高并发立即失败跳号。
-			if !h.cfg.Pool.AcquireLockWait(acct.Name, 180*time.Second) {
-				log.Printf("account %s concurrent limit reached after wait, trying next", acct.Name)
-				continue
+			slotHeld := true
+			releaseSlot := func() {
+				if slotHeld {
+					h.cfg.Pool.ReleaseLock(acct.Name)
+					slotHeld = false
+				}
 			}
 
 			ok, verr := h.cfg.Pool.Validate(acct)
 			if verr == nil && !ok {
-				h.cfg.Pool.ReleaseLock(acct.Name)
+				releaseSlot()
+				h.clearConversationBinding(req.ConversationID, acct.Name)
 				lastErr = errors.New("token invalid")
 				continue
 			}
 			if verr != nil {
-				h.cfg.Pool.ReleaseLock(acct.Name)
+				releaseSlot()
+				h.clearConversationBinding(req.ConversationID, acct.Name)
 				lastErr = verr
 				continue
 			}
@@ -1115,8 +1120,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						break
 					}
 					log.Printf("upstream queue limit retry=%d/%d account=%s, waiting %s", retry+1, queueAttempts, acct.Name, queueDelay)
-					// 释放锁让其他请求有机会，等待后重新获取
-					h.cfg.Pool.ReleaseLock(acct.Name)
+					// 让出本地槽位；退避后重新扫描所有账号，允许换到空闲账号。
+					releaseSlot()
 					queueStarted := time.Now()
 					select {
 					case <-time.After(queueDelay):
@@ -1126,16 +1131,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					event.QueueMs += time.Since(queueStarted).Milliseconds()
-					if !h.cfg.Pool.AcquireLockWait(acct.Name, 30*time.Second) {
-						lastErr = errors.New("concurrent limit: could not reacquire lock after wait")
+					next := h.acquireConversationSlot(r.Context(), req.ConversationID, explicitChat, localSlotWait, nil)
+					if next == nil {
+						lastErr = errors.New("all accounts busy: could not acquire a slot after upstream queue limit")
 						break
+					}
+					acct = next
+					slotHeld = true
+					event.Account = shortID(acct.UID)
+					token, accessKeyID, secretAccessKey = acct.Auth.Credentials()
+					cred = upstream.SignCredential{AccessKeyID: accessKeyID, SecretAccessKey: secretAccessKey, SecurityToken: token}
+					if exact, ok := upstream.CatalogModelID(acct.UID, model); ok {
+						chatOpts.ExactModelID = exact
 					}
 					continue
 				}
 				break // 非并发错误，跳出重试
 			}
 			if serr != nil {
-				h.cfg.Pool.ReleaseLock(acct.Name) // 释放槽位再换号
+				releaseSlot() // 释放槽位再换号
+				h.clearConversationBinding(req.ConversationID, acct.Name)
 				if clientGone(r) {
 					// 调用方自己断开了：上游必然报 context canceled / broken pipe。
 					log.Printf("client disconnected before upstream reply account=%s: %v", acct.Name, serr)
@@ -1167,7 +1182,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				h.convMu.Lock()
 				h.chats[acct.Name] = chatID
-				h.convAcct[req.ConversationID] = acct.Name // 黏性路由：续接锁定同账号
+				h.convAcct[req.ConversationID] = acct.Name // 软粘性跟随最终成功账号
+				h.convSeen[req.ConversationID] = time.Now()
 				h.convMu.Unlock()
 				h.saveChats()
 			}
@@ -1186,7 +1202,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 					h.cfg.Pool.PingKeepalive(acct.Name)
 				}, usage)
 				rc.Close()
-				h.cfg.Pool.ReleaseLock(acct.Name) // 释放锁
+				releaseSlot() // 释放锁
 				if werr != nil {
 					lastUpstreamErr = werr
 					event.Outcome = reqlog.OutcomeStreamError
@@ -1204,9 +1220,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 			comp, aerr := upstream.AggregateRaw(rc)
 			rc.Close()
-			h.cfg.Pool.ReleaseLock(acct.Name) // 释放锁
+			releaseSlot() // 释放锁
 			if aerr != nil {
 				lastUpstreamErr = aerr
+				h.clearConversationBinding(req.ConversationID, acct.Name)
 				if clientGone(r) {
 					log.Printf("client disconnected during aggregate account=%s: %v", acct.Name, aerr)
 					writeOpenAIError(w, http.StatusServiceUnavailable, "client_cancelled", "client disconnected")
@@ -1710,13 +1727,37 @@ func (h *Handler) loadChats() {
 		return
 	}
 	_ = json.Unmarshal(raw, &h.chats)
+	// 兼容旧版 {account: chat_id}；有会话绑定的新格式同时恢复其最近活跃时间。
+	var state struct {
+		Chats    map[string]string    `json:"chats"`
+		Bindings map[string]string    `json:"bindings"`
+		LastSeen map[string]time.Time `json:"last_seen"`
+	}
+	if json.Unmarshal(raw, &state) == nil && state.Chats != nil {
+		h.chats = state.Chats
+		now := time.Now()
+		for key, uid := range state.Bindings {
+			h.convAcct[key] = uid
+			h.convSeen[key] = state.LastSeen[key]
+			if h.convSeen[key].IsZero() {
+				h.convSeen[key] = now // 旧绑定没有 TTL 时间戳，从升级时开始计空闲期
+			}
+		}
+	}
 }
 
 func (h *Handler) saveChats() {
 	if h.cfg.ConvStateFile == "" {
 		return
 	}
-	raw, _ := json.MarshalIndent(h.chats, "", "  ")
+	h.convMu.Lock()
+	state := struct {
+		Chats    map[string]string    `json:"chats"`
+		Bindings map[string]string    `json:"bindings"`
+		LastSeen map[string]time.Time `json:"last_seen"`
+	}{h.chats, h.convAcct, h.convSeen}
+	raw, _ := json.MarshalIndent(state, "", "  ")
+	h.convMu.Unlock()
 	if err := os.WriteFile(h.cfg.ConvStateFile+".tmp", raw, 0o600); err != nil {
 		return
 	}

@@ -209,13 +209,6 @@ func (h *Handler) bridgeImages(ctx context.Context, req *chatRequest, policy Vis
 
 // askVision 用指定的 VL 模型对一张图做一次转述。
 func (h *Handler) askVision(ctx context.Context, imageURL string, policy VisionBridgePolicy) (string, error) {
-	// 挑一个健康账号做识图（上游单账号并发有限，下面还要拿槽位）。
-	// 目录里两个账号的模型清单一致，用池子的常规轮转就够了。
-	acct := h.cfg.Pool.PickExcluding(map[string]bool{}, h.live().AccountStrategy)
-	if acct == nil || acct.Auth == nil {
-		return "", errors.New("没有可用账号做识图")
-	}
-	// 上游单账号并发有限（默认 1），必须照规矩拿槽位，不能绕过池子直接打。
 	// held 必须显式跟踪：重试路径里会先让出槽位再重新获取，失败时若还盲目 Release，
 	// 会把别人正在用的槽位减掉（计数器是账号级的，不分持有者）→ 上游并发被超额。
 	held := false
@@ -228,8 +221,9 @@ func (h *Handler) askVision(ctx context.Context, imageURL string, policy VisionB
 	if wait <= 0 {
 		return "", errors.New("识图预算已耗尽")
 	}
-	if !h.cfg.Pool.AcquireLockWaitContext(ctx, acct.Name, wait) {
-		return "", errors.New("识图等待账号槽位超时")
+	acct := h.acquireAuxiliarySlot(ctx, wait, policy.Model)
+	if acct == nil || acct.Auth == nil {
+		return "", errors.New("没有空闲且满足保留积分规则的账号做识图")
 	}
 	held = true
 	defer func() {
@@ -266,7 +260,8 @@ func (h *Handler) askVision(ctx context.Context, imageURL string, policy VisionB
 				held = false
 				select {
 				case <-time.After(visionQueueRetryDelay):
-					if !h.cfg.Pool.AcquireLockWaitContext(ctx, acct.Name, policy.Timeout) {
+					acct = h.acquireAuxiliarySlot(ctx, policy.Timeout, policy.Model)
+					if acct == nil {
 						return "", errors.New("识图重新获取账号槽位超时")
 					}
 					held = true

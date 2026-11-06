@@ -33,9 +33,7 @@ func (h *Handler) watchInfo() map[string]any {
 // adminOverview 面板总览。
 func (h *Handler) adminOverview(w http.ResponseWriter, r *http.Request) {
 	total, healthy, disabled, cooling, credits := h.cfg.Pool.Stats()
-	h.convMu.Lock()
-	sticky := len(h.convAcct)
-	h.convMu.Unlock()
+	sticky := h.pruneConversationBindings()
 	models := h.modelList(false)
 	ids := make([]map[string]any, 0, len(models))
 	for _, m := range models {

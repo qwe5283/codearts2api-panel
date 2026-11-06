@@ -33,11 +33,17 @@ const storage = () => { const values = new Map(); return { getItem: k => values.
 const account = { uid: 'u1', nickname: '<img src=x onerror=alert(1)>', note: '13800001111 <b>&</b>', credit_balance: null, active_concurrent: 0, max_concurrent: 1, expires_at: '2027-01-01T00:00:00Z' };
 const overview = { uptime_sec: 9000, started_at: '2026-01-01T00:00:00Z', stats: { total: 1, healthy: 1, cooling: 0, disabled: 0, credits: 1234.5, sticky: 2 }, accounts: [account] };
 const configFixture = {
- listen: ':7866', admin_key: 'server-secret', api_key: 'api-secret', max_body_mb: 48,
+ listen: ':7866', admin_key: 'server-secret', api_key: 'api-secret', max_body_mb: 48, session_ttl: '30m', reserve_credits: 12.5,
  image_shrink: { enabled: true, trigger_body_mb: 6, target_image_mb: 3, target_total_mb: 7, max_dimension: 1600, quality: 78, extension: { preserved: 'image' } },
  vision_bridge: { enabled: true, model: 'Qwen3-VL-235B', max_images: 6, max_chars: 7000, max_tokens: 1600, timeout_seconds: 110, total_timeout_seconds: 85, prompt: '先概括图片。\n逐行转写文字。', extension: { preserved: 'vision' } },
  extension: { preserved: true },
 };
+for (const [id, value] of [['cfgSessionTTL', '30m'], ['cfgReserveCredits', 12.5]]) {
+ assert(ids.has(id), 'scheduling control is missing: ' + id);
+ let parent = ids.get(id).parentElement;
+ while (parent && parent.id !== 'configForm') parent = parent.parentElement;
+ assert(parent, 'scheduling control must be inside the config form: ' + id);
+}
 const multimodalControls = [
  ['cfgMaxBodyMB', 48, 64],
  ['cfgImageShrinkEnabled', true, false], ['cfgImageShrinkTriggerBodyMB', 6, 5],
