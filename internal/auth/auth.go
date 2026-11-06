@@ -19,9 +19,9 @@ import (
 
 // Auth 单个账号凭证（登录 oauth2/tokens 返回）。
 type Auth struct {
-	UserID          string `json:"user_id"`
-	UserName        string `json:"user_name"`
-	DomainID        string `json:"domain_id"`
+	UserID   string `json:"user_id"`
+	UserName string `json:"user_name"`
+	DomainID string `json:"domain_id"`
 	// Note 运维备注（如注册手机号、用途标记）。纯本地字段，不参与任何上游请求；
 	// 上游身份端点不返回手机号，这类信息只能在导入/注册时自己记下来。
 	Note            string `json:"note,omitempty"`

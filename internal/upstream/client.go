@@ -161,10 +161,10 @@ func New(timeout time.Duration) *Client {
 	// （chat/models/balance/checkin 等），与官方"全走 Bun fetch"一致。
 	var rt http.RoundTripper = uaTransport{base: tr, ua: defaultUserAgent}
 	c := &Client{
-		http:        &http.Client{Timeout: timeout, Transport: rt},
-		streamHTTP:  &http.Client{Transport: rt},
-		snapBase:    SnapEngineApiHost,
-		srcFail:     map[string]time.Time{},
+		http:       &http.Client{Timeout: timeout, Transport: rt},
+		streamHTTP: &http.Client{Transport: rt},
+		snapBase:   SnapEngineApiHost,
+		srcFail:    map[string]time.Time{},
 	}
 	return c
 }

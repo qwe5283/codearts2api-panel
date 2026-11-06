@@ -172,7 +172,10 @@ func (h *Handler) bridgeImages(ctx context.Context, req *chatRequest, policy Vis
 			st.CacheHits++
 		} else {
 			budget := time.Until(deadline)
-			if budget <= 0 {
+			// 剩余预算连一次识图往返都不够时视同耗尽：发出去也只会超时，
+			// 白占一次上游会话。也让「预算极小」的判定不依赖时钟分辨率
+			// （Windows 单调时钟粒度粗，1ns 预算常常读出来仍 >0）。
+			if budget < minVisionBudget {
 				return st, fmt.Errorf("识图总预算（%s）已用完，第 %d 张图未处理", policy.TotalTimeout, i+1)
 			}
 			if budget > policy.Timeout {
@@ -283,6 +286,9 @@ func (h *Handler) askVision(ctx context.Context, imageURL string, policy VisionB
 		return strings.TrimSpace(comp.Reasoning), nil
 	}
 }
+
+// minVisionBudget 单张识图至少需要的剩余预算，低于它直接按「预算耗尽」处理。
+const minVisionBudget = 100 * time.Millisecond
 
 // visionQueueRetryDelay 识图子请求撞上「并发会话数已达上限」后的等待间隔（测试可覆盖）。
 var visionQueueRetryDelay = 5 * time.Second

@@ -78,7 +78,7 @@ func TestChatShrinksOversizeImageBeforeUpstream(t *testing.T) {
 	defer backend.Close()
 
 	h := shrinkHandler(t, backend.URL, &imgshrink.Policy{
-		TriggerBytes: 100 << 10,
+		TriggerBytes:     100 << 10,
 		TargetImageBytes: 200 << 10, TargetTotalBytes: 200 << 10,
 		MaxDimension: 2048, Quality: 85,
 	})
@@ -117,7 +117,7 @@ func TestChatKeepsSmallImageUntouched(t *testing.T) {
 	defer backend.Close()
 
 	h := shrinkHandler(t, backend.URL, &imgshrink.Policy{
-		TriggerBytes: 4 << 20,
+		TriggerBytes:     4 << 20,
 		TargetImageBytes: 2 << 20, TargetTotalBytes: 4 << 20,
 		MaxDimension: 2048, Quality: 85,
 	})
@@ -184,7 +184,7 @@ func TestShrinkResultIsCached(t *testing.T) {
 	raw := noisePNGBytes(t, 600, 600)
 	origB64 := base64.StdEncoding.EncodeToString(raw)
 	policy := &imgshrink.Policy{
-		TriggerBytes: 100 << 10,
+		TriggerBytes:     100 << 10,
 		TargetImageBytes: 200 << 10, TargetTotalBytes: 200 << 10,
 		MaxDimension: 2048, Quality: 85,
 	}
