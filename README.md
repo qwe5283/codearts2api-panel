@@ -10,7 +10,7 @@
 | --- | --- |
 | 账号池 | OAuth 浏览器授权、JSON / AK-SK 导入、启用与禁用、清除冷却、删除、热重载 |
 | 凭据 | 永久 AK/SK、STS 临时凭据、具备完整 PKCE / DPoP 材料的 OAuth 自动续期 |
-| 网关 | `/v1/models`、`/v1/chat/completions`，流式与非流式、工具调用、图片内容块 |
+| 网关 | `/v1/models`、`/v1/chat/completions`（OpenAI）、`/v1/messages`（Anthropic，Claude Code 直连），流式与非流式、工具调用、图片内容块 |
 | 多账号 | 并发限制、会话关联、错误冷却、失败换号与排队重试 |
 | 模型目录 | AgentCenter、内置模型发现；显示上下文、积分倍率及已知模型标签和图片能力 |
 | 额度 | 查询 CodeArts 套餐 CREDIT 积分，未知值不显示为 0 |
@@ -213,6 +213,30 @@ curl http://127.0.0.1:7866/v1/chat/completions \
 ```
 
 `GLM-5.2` 仅为示例，请替换为账号可用模型。设 `stream:false` 可请求聚合后的普通 JSON 响应；工具使用 OpenAI 风格的 `tools` / `tool_calls` / `tool_call_id`。
+
+## 调用 Anthropic 兼容 API（Claude Code）
+
+除 OpenAI 协议外，网关额外提供 Anthropic Messages 协议，供 Claude Code、Anthropic SDK 等客户端直连：
+
+```text
+Base URL:    http://127.0.0.1:7866
+API Key:     config.json 中的 api_key
+模型名:       任意 Anthropic 名称（如 claude-sonnet-4-5）——网关不按它选号
+```
+
+端点：
+
+- `POST /v1/messages`（流式与非流式）
+- `POST /v1/messages/count_tokens`（本地估算，供客户端做上下文预算）
+
+```sh
+curl http://127.0.0.1:7866/v1/messages \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"你好"}]}'
+```
+
+实现说明：网关上游只有 OpenAI chat completions，请求被就地翻成 chat 请求、走与 OpenAI **同一套**账号轮转 / 并发排队 / 重试 / 图片处理管道，响应再翻回 Anthropic 形状（含 `message_start` … `message_stop` 的完整 SSE 事件链）。协议转换由 `internal/apicompat` 提供（第三方 LGPL-3.0 移植，见 `internal/apicompat/PROVENANCE.md`）。**模型选择**：优先用客户端 `model` 字段里的名字——若它命中池里的模型目录（如 `kimi-k3.1-pro`）就照用；否则（Claude Code 默认发的 `claude-*`，上游并无此模型）回落到配置的默认模型（面板「服务 → 默认模型」）。因此想用某个具体模型，直接在客户端把 `model` 填成 `/v1/models` 里的 ID 即可；填 Anthropic 名字则用默认模型。
 
 图片使用支持多模态的模型，消息形状为：
 

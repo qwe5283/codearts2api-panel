@@ -249,6 +249,10 @@ func NewHandler(cfg Config) *Handler {
 	h.loadChats()
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	// Anthropic Messages 协议（Claude Code / Anthropic SDK 直连）。内部回环到
+	// chatCompletions，复用账号轮转/排队/重试/图片处理，只做协议双向转换。
+	h.mux.HandleFunc("POST /v1/messages", h.withAuth(h.anthropicMessages))
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuth(h.countTokens))
 	h.mux.HandleFunc("GET /status", h.withAdminAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	// WorkBuddy 风格控制台（页面不鉴权，API 走 Bearer）
